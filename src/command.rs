@@ -1,7 +1,7 @@
 use crate::{
     constants::{
-        ATCA_COMMAND_FLAG, ATCA_ECDH, ATCA_GENKEY, ATCA_INFO, ATCA_LOCK, ATCA_NONCE, ATCA_RANDOM,
-        ATCA_READ, ATCA_RSP_SIZE_MIN, ATCA_SIGN, ATCA_WRITE, CMD_STATUS_BYTE_COMM, CMD_STATUS_BYTE_ECC,
+        ATCA_ECDH, ATCA_GENKEY, ATCA_INFO, ATCA_LOCK, ATCA_NONCE, ATCA_RANDOM, ATCA_READ,
+        ATCA_RSP_SIZE_MIN, ATCA_SIGN, ATCA_WRITE, CMD_STATUS_BYTE_COMM, CMD_STATUS_BYTE_ECC,
         CMD_STATUS_BYTE_EXEC, CMD_STATUS_BYTE_PARSE, CMD_STATUS_BYTE_SELF_TEST,
         CMD_STATUS_BYTE_SUCCESS, CMD_STATUS_BYTE_WAKE_SUCCESS, CMD_STATUS_BYTE_WATCHDOG,
     },
@@ -182,7 +182,7 @@ impl EccCommand {
     }
 
     pub fn bytes_into(&self, bytes: &mut BytesMut) {
-        bytes.put_slice(&[ATCA_COMMAND_FLAG, 0x00]);
+        bytes.put_slice(&[0x00, 0x00]);
         match self {
             Self::Info => {
                 put_cmd!(bytes, ATCA_INFO, 0, 0);
@@ -240,20 +240,19 @@ impl EccCommand {
     }
 
     pub fn duration(&self) -> Duration {
-        #[cfg(feature = "swi")]
-        let micros = match self {
-            Self::Info => 5_000,
-            Self::GenKey { .. } => 85_000,
-            Self::Read { .. } => 8_000,
-            Self::Write { .. } => 8_000,
-            // ecc608b increases the default lock duration of 15_000 by about 30%
-            Self::Lock { .. } => 19_500,
-            Self::Nonce { .. } => 17_000,
-            Self::Sign { .. } => 80_000,
-            Self::Ecdh { .. } => 42_000,
-            Self::Random => 15_000,
-        };
-        #[cfg(feature = "i2c")]
+        //TODO FIX!!
+        // let micros = match self {
+        //     Self::Info => 5_000,
+        //     Self::GenKey { .. } => 85_000,
+        //     Self::Read { .. } => 8_000,
+        //     Self::Write { .. } => 8_000,
+        //     // ecc608b increases the default lock duration of 15_000 by about 30%
+        //     Self::Lock { .. } => 19_500,
+        //     Self::Nonce { .. } => 17_000,
+        //     Self::Sign { .. } => 80_000,
+        //     Self::Ecdh { .. } => 42_000,
+        //     Self::Random => 15_000,
+        // };
         let micros = match self {
             Self::Info => 500,
             Self::GenKey { .. } => 59_000,

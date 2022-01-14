@@ -1,5 +1,8 @@
-use crate::constants::{ATCA_CMD_SIZE_MAX, WAKE_DELAY};
-use crate::transport::EccTransport;
+use crate::constants::{
+    ATCA_SWI_CMD_SIZE_MAX, ATCA_I2C_CMD_SIZE_MAX, ATCA_I2C_COMMAND_FLAG,
+    ATCA_SWI_COMMAND_FLAG, WAKE_DELAY
+};
+use crate::transport::{EccTransport, TransportProtocol};
 use crate::{
     command::{EccCommand, EccResponse},
     Address, DataBuffer, Error, KeyConfig, Result, SlotConfig, Zone,
@@ -162,7 +165,16 @@ impl Ecc {
         sleep: bool,
         retries: u8,
     ) -> Result<Bytes> {
-        let mut buf = BytesMut::with_capacity(ATCA_CMD_SIZE_MAX as usize);
+        let mut buf = BytesMut::new();
+        match self.transport.protocol{
+            TransportProtocol::I2c => { 
+                buf = BytesMut::with_capacity(ATCA_I2C_CMD_SIZE_MAX as usize);
+            }
+            TransportProtocol::Swi => {
+                buf = BytesMut::with_capacity(ATCA_SWI_CMD_SIZE_MAX as usize);
+            }
+        }
+
         for retry in 0..retries {
             let response = self.transport.send_wake();
             
@@ -183,6 +195,11 @@ impl Ecc {
 
             buf.clear();         
             command.bytes_into(&mut buf);
+
+            match self.transport.protocol {
+                TransportProtocol::I2c => {buf[0] = ATCA_I2C_COMMAND_FLAG}
+                TransportProtocol::Swi => {buf[0] = ATCA_SWI_COMMAND_FLAG}
+            }
             
             if let Err(_err) = self.transport.send_recv_buf(command.duration(), &mut buf) {
                 if retry == retries {

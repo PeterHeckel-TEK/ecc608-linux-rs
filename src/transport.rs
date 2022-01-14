@@ -3,80 +3,130 @@ use std::{thread, time::Duration};
 
 use crate::{Result, Error};
 
-#[cfg(all(feature = "swi", feature = "i2c"))]
-compile_error!("feature \"swi\" and feature \"i2c\" cannot be enabled at the same time");
-
-#[cfg(feature = "swi")]
 use bytes::BufMut;
-#[cfg(feature = "swi")]
-use serialport::{ClearBuffer, DataBits, SerialPort, StopBits};
-#[cfg(feature = "swi")]
-use crate::{command::EccResponse, constants::{ATCA_CMD_SIZE_MAX, WAKE_DELAY}};
+use serialport::{ClearBuffer, SerialPort};
+use crate::{command::EccResponse, constants::{ATCA_SWI_CMD_SIZE_MAX, WAKE_DELAY}};
 
-#[cfg(feature = "i2c")]
 use i2c_linux::{I2c, ReadFlags};
-#[cfg(feature = "i2c")]
 use std::fs::File;
 
-
-#[cfg(feature = "swi")]
-pub struct EccTransport {
-    port: String,
-}
-
-pub(crate) const RECV_RETRIES: u8 = 2;
 pub(crate) const RECV_RETRY_WAIT: Duration = Duration::from_millis(50);
+pub(crate) const RECV_RETRIES: u8 = 2;
 
-#[cfg(feature = "i2c")]
-pub struct EccTransport {
-    i2c: I2c<File>,
-    address: u16,
+pub(crate) enum TransportProtocol { 
+    I2c,
+    Swi,
+}
+pub(crate) struct EccTransport
+{
+    swi_port: Option<Box<dyn SerialPort>>, 
+    i2c_port: Option<I2c<File>>,
+    i2c_address: u16,
+    pub(crate) protocol: TransportProtocol,
 }
 
-#[cfg(feature = "i2c")]
-impl EccTransport {
+impl EccTransport
+{
     pub fn from_path(path: &str, address: u16) -> Result<Self> {
-        let mut i2c = I2c::from_path(path)?;
-        i2c.smbus_set_slave_address(address, false)?;
-        Ok(Self { i2c, address })
+        
+        if path.contains("/dev/tty"){
+            let swi_port = serialport::new(path, 230_400)
+            .data_bits(serialport::DataBits::Seven)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .open().unwrap_or_else(|e| {
+                eprintln!("Failed to open serial port. Error: {}", e);
+                ::std::process::exit(1);
+            });
+            
+            Ok(Self {
+                i2c_port: None,
+                i2c_address: address,
+                swi_port: Some(swi_port),
+                protocol: TransportProtocol::Swi
+            })    
+        }
+        else {
+            let mut i2c = I2c::from_path(path)?;
+            i2c.smbus_set_slave_address(address, false)?;
+            
+            Ok(Self { 
+                swi_port: None,
+                i2c_port: Some(i2c),
+                i2c_address: address,
+                protocol: TransportProtocol::I2c
+            })
+        }
     }
 
     pub fn send_wake(&mut self) -> Result {
-        let _ = self.send_buf(0, &[0]);
-        Ok(())
+        match self.protocol {
+            TransportProtocol::I2c =>{
+                let _ = self.send_i2c_buf(0, &[0]);
+                Ok(())
+            }
+            TransportProtocol::Swi => {
+                let _ = self.swi_port.as_mut().unwrap().write(&[0]);
+                
+                thread::sleep(WAKE_DELAY);
+                self.read_swi_wake_response() 
+            },
+        }
     }
 
     pub fn send_sleep(&mut self) {
-        let _ = self.send_buf(self.address, &[1]);
+        match self.protocol {
+            TransportProtocol::I2c => {
+                let _ = self.send_i2c_buf(self.i2c_address, &[1]);
+            } 
+            TransportProtocol::Swi => {
+                let mut sleep_msg = BytesMut::new();
+                sleep_msg.put_u8(0xCC);
+                let sleep_encoded = self.encode_uart_to_swi(&sleep_msg);
+        
+                let _ = self.swi_port.as_mut().unwrap().write(&sleep_encoded);
+            },
+        }
     }
 
     pub fn send_recv_buf(&mut self, delay: Duration, buf: &mut BytesMut) -> Result {
-        self.send_buf(self.address, &buf[..])?;
-        thread::sleep(delay);
-        self.recv_buf(buf)
+        match self.protocol {
+            TransportProtocol::I2c => {
+                self.send_i2c_buf(self.i2c_address, &buf[..])?;
+                thread::sleep(delay);
+                self.recv_i2c_buf(buf)
+            },
+            TransportProtocol::Swi => {
+                let _ = self.swi_port.as_mut().unwrap().clear(ClearBuffer::All);
+                let swi_msg = self.encode_uart_to_swi(buf);
+                self.send_swi_buf(&swi_msg)?;
+                thread::sleep(delay);
+                self.recv_swi_buf(buf)
+            },
+        }
     }
 
-    fn send_buf(&mut self, address: u16, buf: &[u8]) -> Result {
+    fn send_i2c_buf(&mut self, address: u16, buf: &[u8]) -> Result {
         let write_msg = i2c_linux::Message::Write {
             address,
             data: buf,
             flags: Default::default(),
         };
 
-        self.i2c.i2c_transfer(&mut [write_msg])?;
+        self.i2c_port.as_mut().unwrap().i2c_transfer(&mut [write_msg])?;
         Ok(())
     }
 
-    fn recv_buf(&mut self, buf: &mut BytesMut) -> Result {
+    fn recv_i2c_buf(&mut self, buf: &mut BytesMut) -> Result {
         unsafe { buf.set_len(1) };
         buf[0] = 0xff;
         for _retry in 0..RECV_RETRIES {
             let msg = i2c_linux::Message::Read {
-                address: self.address,
+                address: self.i2c_address,
                 data: &mut buf[0..1],
                 flags: Default::default(),
             };
-            if let Err(_err) = self.i2c.i2c_transfer(&mut [msg]) {
+            if let Err(_err) = self.i2c_port.as_mut().unwrap().i2c_transfer(&mut [msg]) {
             } else {
                 break;
             }
@@ -88,68 +138,25 @@ impl EccTransport {
         }
         unsafe { buf.set_len(count) };
         let read_msg = i2c_linux::Message::Read {
-            address: self.address,
+            address: self.i2c_address,
             data: &mut buf[1..count],
             flags: ReadFlags::NO_START,
         };
-        self.i2c.i2c_transfer(&mut [read_msg])?;
+        self.i2c_port.as_mut().unwrap().i2c_transfer(&mut [read_msg])?;
         Ok(())
     }
-}
 
-#[cfg(feature = "swi")]
-impl EccTransport {
-    pub fn from_path(path: &str, address: u16) -> Result<Self> {
-
-        let _ = address; //keep the API the same. Address refers to i2c addr which isn't required for SWI
-        let port = String::from( path );
-
-        Ok(Self {port})
-    }
-
-    pub fn send_wake(&mut self) -> Result {
-        let port_name = &self.port;
-        let baud_rate = 115_200;
-        let stop_bits = StopBits::One;
-        let data_bits = DataBits::Eight;
-        let uart_wake_builder = serialport::new(port_name, baud_rate)
-            .stop_bits(stop_bits)
-            .data_bits(data_bits);
-
-        let mut uart_wake = uart_wake_builder.open().unwrap_or_else(|e| {
-            eprintln!("Failed to open port {}. Error: {}", port_name,e);
-            ::std::process::exit(1);
-        });
-        let _ = uart_wake.write(&[0]);
-        
-        thread::sleep(WAKE_DELAY);
-        self.read_wake_response()
-    }
-
-    fn read_wake_response( &mut self) -> Result {
-        let port_name = &self.port;
-        let baud_rate = 230_400;
-        let stop_bits = StopBits::One;
-        let data_bits = DataBits::Seven;
-        let uart_cmd_builder = serialport::new(port_name, baud_rate)
-            .stop_bits(stop_bits)
-            .data_bits(data_bits);
-
-        let mut uart_cmd = uart_cmd_builder.open().unwrap_or_else(|e| {
-            eprintln!("Failed to open port {}. Error: {}", port_name,e);
-            ::std::process::exit(1);
-        });
-        
+    fn read_swi_wake_response( &mut self) -> Result {
         // Send transmit flag to signal bus
         let mut transmit_flag = BytesMut::new();
         transmit_flag.put_u8(0x88);
         let encoded_transmit_flag = self.encode_uart_to_swi(&transmit_flag );
-        uart_cmd.write(&encoded_transmit_flag)?;
+        self.swi_port.as_mut().unwrap().write(&encoded_transmit_flag)?;
         thread::sleep(Duration::from_micros(5_000) );
         
         let mut encoded_msg = BytesMut::new();
         encoded_msg.resize(40, 0);
-        let _ = uart_cmd.read(&mut encoded_msg);
+        let _ = self.swi_port.as_mut().unwrap().read(&mut encoded_msg);
 
         let mut decoded_msg = BytesMut::new();
         decoded_msg.resize(5, 0);
@@ -161,52 +168,9 @@ impl EccTransport {
         Ok(())
     }
 
-    pub fn send_sleep(&mut self) {        
-        let port_name = &self.port;
-        let baud_rate = 230_400;
-        let stop_bits = StopBits::One;
-        let data_bits = DataBits::Seven;
-        let uart_cmd_builder = serialport::new(port_name, baud_rate)
-            .stop_bits(stop_bits)
-            .data_bits(data_bits);
-
-        let mut uart_cmd = uart_cmd_builder.open().unwrap_or_else(|e| {
-            eprintln!("Failed to open port {}. Error: {}", port_name,e);
-            ::std::process::exit(1);
-        });
-
-        let mut sleep_msg = BytesMut::new();
-        sleep_msg.put_u8(0xCC);
-        let sleep_encoded = self.encode_uart_to_swi(&sleep_msg);
-
-        let _ = uart_cmd.write(&sleep_encoded);
-    }
-
-    pub fn send_recv_buf(&mut self, delay: Duration, buf: &mut BytesMut) -> Result {
+    fn send_swi_buf(&mut self, buf: &[u8]) -> Result {
         
-        let port_name = &self.port;
-        let baud_rate = 230_400;
-        let stop_bits = StopBits::One;
-        let data_bits = DataBits::Seven;
-        let uart_cmd_builder = serialport::new(port_name, baud_rate)
-            .stop_bits(stop_bits)
-            .data_bits(data_bits);
-
-        let mut uart_driver = uart_cmd_builder.open().unwrap_or_else(|e| {
-            eprintln!("Failed to open port {}. Error: {}", port_name,e);
-            ::std::process::exit(1);
-        });
-        
-        let _ = uart_driver.clear(ClearBuffer::All);
-        let swi_msg = self.encode_uart_to_swi(buf);
-        self.send_buf(&swi_msg, &mut uart_driver)?;
-        thread::sleep(delay);
-        self.recv_buf(buf, &mut uart_driver)
-    }
-
-    fn send_buf(&mut self, buf: &[u8], serial_port: &mut Box<dyn SerialPort>) -> Result {
-        
-        let send_size = serial_port.write(buf)?;
+        let send_size = self.swi_port.as_mut().unwrap().write(buf)?;
 
         //Each byte takes ~45us to transmit, so we must wait for the transmission to finish before proceeding
         let uart_tx_time = Duration::from_micros( (buf.len() * 45) as u64); 
@@ -214,25 +178,25 @@ impl EccTransport {
         //Because Tx line is linked with Rx line, all sent msgs are returned on the Rx line and must be cleared from the buffer
         let mut clear_rx_line = BytesMut::new();
         clear_rx_line.resize(send_size, 0);
-        let _ = serial_port.read_exact( &mut clear_rx_line );
+        let _ = self.swi_port.as_mut().unwrap().read_exact( &mut clear_rx_line );
 
         Ok(())
     }
 
-    fn recv_buf(&mut self, buf: &mut BytesMut,  serial_port: &mut Box<dyn SerialPort>) -> Result {
+    fn recv_swi_buf(&mut self, buf: &mut BytesMut) -> Result {
         let mut encoded_msg = BytesMut::new();
-        encoded_msg.resize(ATCA_CMD_SIZE_MAX as usize,0);
+        encoded_msg.resize(ATCA_SWI_CMD_SIZE_MAX as usize,0);
         
         let mut transmit_flag = BytesMut::new();
         transmit_flag.put_u8(0x88);
         let encoded_transmit_flag = self.encode_uart_to_swi(&transmit_flag );
         
-        let _ = serial_port.clear(ClearBuffer::All);
+        let _ = self.swi_port.as_mut().unwrap().clear(ClearBuffer::All);
 
         for retry in 0..RECV_RETRIES {
-            serial_port.write(&encoded_transmit_flag)?;
+            self.swi_port.as_mut().unwrap().write(&encoded_transmit_flag)?;
             thread::sleep(Duration::from_micros(40_000) );
-            let read_response = serial_port.read(&mut encoded_msg);
+            let read_response = self.swi_port.as_mut().unwrap().read(&mut encoded_msg);
             
             match read_response {
                 Ok(cnt) if cnt == 8 => { //If the buffer is empty except for the transmit flag, wait & try again
@@ -247,22 +211,23 @@ impl EccTransport {
             thread::sleep(RECV_RETRY_WAIT);
         }
 
+        //TODO: Fix Sizes. Will do after first testing
         let mut decoded_message = BytesMut::new();
-        decoded_message.resize((ATCA_CMD_SIZE_MAX) as usize, 0);   
+        decoded_message.resize((ATCA_SWI_CMD_SIZE_MAX) as usize, 0);   
 
         self.decode_swi_to_uart(&encoded_msg, &mut decoded_message);
 
-        let encoded_msg_size = decoded_message[1];
+        let msg_size = decoded_message[1];
 
-        if encoded_msg_size as u16 > ATCA_CMD_SIZE_MAX/8{
+        if msg_size as u16 > ATCA_SWI_CMD_SIZE_MAX/8{
             return Err(Error::Timeout)
         }
 
-        buf.resize(encoded_msg_size as usize, 0);
+        buf.resize(msg_size as usize, 0);
 
         // Remove the transmit flag at the beginning & the excess buffer space at the end
         let _transmit_flag = decoded_message.split_to(1);
-        decoded_message.truncate(encoded_msg_size as usize);
+        decoded_message.truncate(msg_size as usize);
 
         buf.copy_from_slice(&decoded_message);
 
