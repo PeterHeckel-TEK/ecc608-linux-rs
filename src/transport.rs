@@ -5,7 +5,7 @@ use crate::{Result, Error};
 
 use bytes::BufMut;
 use serialport::{ClearBuffer, SerialPort};
-use crate::{command::EccResponse, constants::{ATCA_SWI_CMD_SIZE_MAX, WAKE_DELAY}};
+use crate::{constants::{ATCA_SWI_CMD_SIZE_MAX, WAKE_DELAY}};
 
 use i2c_linux::{I2c, ReadFlags};
 use std::fs::File;
@@ -34,6 +34,7 @@ impl EccTransport
             .data_bits(serialport::DataBits::Seven)
             .parity(serialport::Parity::None)
             .stop_bits(serialport::StopBits::One)
+            .timeout(Duration::from_millis(50))
             .open().unwrap_or_else(|e| {
                 eprintln!("Failed to open serial port. Error: {}", e);
                 ::std::process::exit(1);
@@ -66,10 +67,17 @@ impl EccTransport
                 Ok(())
             }
             TransportProtocol::Swi => {
+                if let Err(_err) = self.swi_port.as_mut().unwrap().set_baud_rate(115_200)
+                {
+                    return Err(Error::timeout());
+                }
+                
                 let _ = self.swi_port.as_mut().unwrap().write(&[0]);
                 
                 thread::sleep(WAKE_DELAY);
-                self.read_swi_wake_response() 
+                let _ = self.swi_port.as_mut().unwrap().set_baud_rate(230_400);
+                let _ = self.swi_port.as_mut().unwrap().clear(ClearBuffer::All);
+                Ok(()) 
             },
         }
     }
@@ -85,6 +93,7 @@ impl EccTransport
                 let sleep_encoded = self.encode_uart_to_swi(&sleep_msg);
         
                 let _ = self.swi_port.as_mut().unwrap().write(&sleep_encoded);
+                thread::sleep( Duration::from_micros(300));
             },
         }
     }
@@ -143,28 +152,6 @@ impl EccTransport
             flags: ReadFlags::NO_START,
         };
         self.i2c_port.as_mut().unwrap().i2c_transfer(&mut [read_msg])?;
-        Ok(())
-    }
-
-    fn read_swi_wake_response( &mut self) -> Result {
-        // Send transmit flag to signal bus
-        let mut transmit_flag = BytesMut::new();
-        transmit_flag.put_u8(0x88);
-        let encoded_transmit_flag = self.encode_uart_to_swi(&transmit_flag );
-        self.swi_port.as_mut().unwrap().write(&encoded_transmit_flag)?;
-        thread::sleep(Duration::from_micros(5_000) );
-        
-        let mut encoded_msg = BytesMut::new();
-        encoded_msg.resize(40, 0);
-        let _ = self.swi_port.as_mut().unwrap().read(&mut encoded_msg);
-
-        let mut decoded_msg = BytesMut::new();
-        decoded_msg.resize(5, 0);
-        
-        self.decode_swi_to_uart(&encoded_msg, &mut decoded_msg);
-        
-        let _ = EccResponse::from_bytes(&decoded_msg[1..])?;
-        
         Ok(())
     }
 
