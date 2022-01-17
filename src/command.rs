@@ -241,30 +241,30 @@ impl EccCommand {
 
     pub fn duration(&self) -> Duration {
         //TODO FIX!!
-        // let micros = match self {
-        //     Self::Info => 5_000,
-        //     Self::GenKey { .. } => 85_000,
-        //     Self::Read { .. } => 8_000,
-        //     Self::Write { .. } => 8_000,
-        //     // ecc608b increases the default lock duration of 15_000 by about 30%
-        //     Self::Lock { .. } => 19_500,
-        //     Self::Nonce { .. } => 17_000,
-        //     Self::Sign { .. } => 80_000,
-        //     Self::Ecdh { .. } => 42_000,
-        //     Self::Random => 15_000,
-        // };
         let micros = match self {
-            Self::Info => 500,
-            Self::GenKey { .. } => 59_000,
-            Self::Read { .. } => 800,
+            Self::Info => 5_000,
+            Self::GenKey { .. } => 85_000,
+            Self::Read { .. } => 8_000,
             Self::Write { .. } => 8_000,
             // ecc608b increases the default lock duration of 15_000 by about 30%
             Self::Lock { .. } => 19_500,
             Self::Nonce { .. } => 17_000,
-            Self::Sign { .. } => 64_000,
-            Self::Ecdh { .. } => 28_000,
+            Self::Sign { .. } => 80_000,
+            Self::Ecdh { .. } => 42_000,
             Self::Random => 15_000,
         };
+        // let micros = match self {
+        //     Self::Info => 500,
+        //     Self::GenKey { .. } => 59_000,
+        //     Self::Read { .. } => 800,
+        //     Self::Write { .. } => 8_000,
+        //     // ecc608b increases the default lock duration of 15_000 by about 30%
+        //     Self::Lock { .. } => 19_500,
+        //     Self::Nonce { .. } => 17_000,
+        //     Self::Sign { .. } => 64_000,
+        //     Self::Ecdh { .. } => 28_000,
+        //     Self::Random => 15_000,
+        // };
         Duration::from_micros(micros)
     }
 }
