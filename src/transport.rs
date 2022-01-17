@@ -5,7 +5,7 @@ use crate::{Result, Error};
 
 use bytes::BufMut;
 use serialport::{ClearBuffer, SerialPort};
-use crate::{constants::{ATCA_SWI_CMD_SIZE_MAX, WAKE_DELAY}};
+use crate::{constants::{WAKE_DELAY}};
 
 use i2c_linux::{I2c, ReadFlags};
 use std::fs::File;
@@ -64,6 +64,7 @@ impl EccTransport
         match self.protocol {
             TransportProtocol::I2c =>{
                 let _ = self.send_i2c_buf(0, &[0]);
+                thread::sleep(WAKE_DELAY);
                 Ok(())
             }
             TransportProtocol::Swi => {
@@ -171,53 +172,35 @@ impl EccTransport
     }
 
     fn recv_swi_buf(&mut self, buf: &mut BytesMut) -> Result {
-        let mut encoded_msg = BytesMut::new();
-        encoded_msg.resize(ATCA_SWI_CMD_SIZE_MAX as usize,0);
-        
+        unsafe { buf.set_len(2) };
+        buf[1] = 0xFF;
+
         let mut transmit_flag = BytesMut::new();
         transmit_flag.put_u8(0x88);
         let encoded_transmit_flag = self.encode_uart_to_swi(&transmit_flag );
-        
+
         let _ = self.swi_port.as_mut().unwrap().clear(ClearBuffer::All);
 
-        for retry in 0..RECV_RETRIES {
+        for _retry in 0..RECV_RETRIES {
             self.swi_port.as_mut().unwrap().write(&encoded_transmit_flag)?;
-            thread::sleep(Duration::from_micros(40_000) );
-            let read_response = self.swi_port.as_mut().unwrap().read(&mut encoded_msg);
-            
-            match read_response {
-                Ok(cnt) if cnt == 8 => { //If the buffer is empty except for the transmit flag, wait & try again
-                },
-                Ok(cnt) if cnt > 16 => {
-                    break;
-                },
-                _ if retry != RECV_RETRIES => continue,
-                _  => return Err(Error::Timeout) 
+
+            if let Err(_err) = self.decode_swi_to_uart(&mut buf[0..2]) {
+            } else {
+                break;
             }
-            
             thread::sleep(RECV_RETRY_WAIT);
         }
 
-        //TODO: Fix Sizes. Will do after first testing
-        let mut decoded_message = BytesMut::new();
-        decoded_message.resize((ATCA_SWI_CMD_SIZE_MAX) as usize, 0);   
+        let _ = buf.split_to(1); // Discard transmit flag
 
-        self.decode_swi_to_uart(&encoded_msg, &mut decoded_message);
-
-        let msg_size = decoded_message[1];
-
-        if msg_size as u16 > ATCA_SWI_CMD_SIZE_MAX/8{
-            return Err(Error::Timeout)
+        let count = buf[0] as usize;
+        if count == 0xFF {
+            return Err(Error::timeout());
         }
-
-        buf.resize(msg_size as usize, 0);
-
-        // Remove the transmit flag at the beginning & the excess buffer space at the end
-        let _transmit_flag = decoded_message.split_to(1);
-        decoded_message.truncate(msg_size as usize);
-
-        buf.copy_from_slice(&decoded_message);
-
+        unsafe { buf.set_len(count) };
+        if let Err(_err) = self.decode_swi_to_uart(&mut buf[1..count]) {
+            return Err(Error::timeout());
+        }
         Ok(())
     }
 
@@ -237,25 +220,27 @@ impl EccTransport
         }
         bit_field
     }
-    
-    fn decode_swi_to_uart(&mut self, swi_msg: &BytesMut, uart_msg: &mut BytesMut ) {
-    
-        uart_msg.clear();
-        assert!( (swi_msg.len() % 8) == 0);
-        uart_msg.resize( &swi_msg.len() / 8, 0 );
-    
-        let mut i = 0; 
-        for byte in uart_msg.iter_mut() {
-            let bit_slice= &swi_msg[i..i+8];
-            
-            for bit in bit_slice.iter(){
-                if *bit == 0x7F || *bit == 0x7E {
-                    *byte ^= 1;
-                }
-                *byte = byte.rotate_right(1);
-            }
-            i += 8;
-        }
-    }
 
+    fn decode_swi_to_uart(&mut self, buf: &mut [u8]) -> Result {
+        for byte_idx in 0..buf.len() {
+            let mut decoded_byte = 0;
+            let mut bit_mask: u8 = 1;
+
+            while bit_mask != 0 {
+                let mut rx_byte = [0; 1];
+
+                if let Ok(_rx_count) = self.swi_port.as_mut().unwrap().read(&mut rx_byte) {
+                    if (rx_byte[0] ^ 0x7F) < 2 {
+                        decoded_byte |= bit_mask;
+                    }
+                } else {
+                    return Err(Error::timeout());
+                }
+                bit_mask = bit_mask << 1;
+            }
+
+            buf[byte_idx] = decoded_byte;
+        }
+        Ok(())
+    }
 }

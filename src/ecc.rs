@@ -1,7 +1,4 @@
-use crate::constants::{
-    ATCA_SWI_CMD_SIZE_MAX, ATCA_I2C_CMD_SIZE_MAX, ATCA_I2C_COMMAND_FLAG,
-    ATCA_SWI_COMMAND_FLAG, WAKE_DELAY
-};
+use crate::constants::{ ATCA_CMD_SIZE_MAX, ATCA_I2C_COMMAND_FLAG, ATCA_SWI_COMMAND_FLAG, WAKE_DELAY };
 use crate::transport::{EccTransport, TransportProtocol};
 use crate::{
     command::{EccCommand, EccResponse},
@@ -166,17 +163,10 @@ impl Ecc {
         retries: u8,
     ) -> Result<Bytes> {
 
-        let mut buf = match self.transport.protocol {
-            TransportProtocol::I2c => BytesMut::with_capacity(ATCA_I2C_CMD_SIZE_MAX as usize),
-            TransportProtocol::Swi => BytesMut::with_capacity(ATCA_SWI_CMD_SIZE_MAX as usize),
-        };
+        let mut buf = BytesMut::with_capacity(ATCA_CMD_SIZE_MAX as usize);
 
         for retry in 0..retries {
             let response = self.transport.send_wake();
-            
-            if cfg!(feature = "i2c"){           //SWI has wake delay built into interaction
-                thread::sleep(WAKE_DELAY);
-            }
 
             match response {
                 Ok(_) => (),
