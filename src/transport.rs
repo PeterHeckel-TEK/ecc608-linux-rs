@@ -5,32 +5,33 @@ use crate::{Result, Error};
 
 use bytes::BufMut;
 use serialport::{ClearBuffer, SerialPort};
-use crate::{constants::{WAKE_DELAY}};
+use crate::{constants::{ATCA_SWI_SLEEP_FLAG, ATCA_SWI_TRANSMIT_FLAG, WAKE_DELAY}};
 
 use i2c_linux::{I2c, ReadFlags};
 use std::fs::File;
 
-pub(crate) const RECV_RETRY_WAIT: Duration = Duration::from_millis(50);
-pub(crate) const RECV_RETRIES: u8 = 2;
+const RECV_RETRY_WAIT: Duration = Duration::from_millis(50);
+const RECV_RETRIES: u8 = 2;
+const SWI_DEFAULT_BAUDRATE: u32 = 230_400;
+const SWI_WAKE_BAUDRATE: u32 = 115_200;
+const SWI_BIT_SEND_DELAY: Duration = Duration::from_micros(45);
 
 pub(crate) enum TransportProtocol { 
     I2c,
     Swi,
 }
-pub(crate) struct EccTransport
-{
+pub(crate) struct EccTransport {
     swi_port: Option<Box<dyn SerialPort>>, 
     i2c_port: Option<I2c<File>>,
     i2c_address: u16,
     pub(crate) protocol: TransportProtocol,
 }
 
-impl EccTransport
-{
+impl EccTransport {
     pub fn from_path(path: &str, address: u16) -> Result<Self> {
         
         if path.contains("/dev/tty"){
-            let swi_port = serialport::new(path, 230_400)
+            let swi_port = serialport::new(path, SWI_DEFAULT_BAUDRATE)
             .data_bits(serialport::DataBits::Seven)
             .parity(serialport::Parity::None)
             .stop_bits(serialport::StopBits::One)
@@ -47,7 +48,7 @@ impl EccTransport
                 protocol: TransportProtocol::Swi
             })    
         }
-        else {
+        else if path.contains("/dev/i2c") {
             let mut i2c = I2c::from_path(path)?;
             i2c.smbus_set_slave_address(address, false)?;
             
@@ -57,6 +58,10 @@ impl EccTransport
                 i2c_address: address,
                 protocol: TransportProtocol::I2c
             })
+        }
+        else {
+            eprintln!("Failed to open selected port");
+            ::std::process::exit(1);
         }
     }
 
@@ -68,7 +73,7 @@ impl EccTransport
                 Ok(())
             }
             TransportProtocol::Swi => {
-                if let Err(_err) = self.swi_port.as_mut().unwrap().set_baud_rate(115_200)
+                if let Err(_err) = self.swi_port.as_mut().unwrap().set_baud_rate(SWI_WAKE_BAUDRATE)
                 {
                     return Err(Error::timeout());
                 }
@@ -76,7 +81,7 @@ impl EccTransport
                 let _ = self.swi_port.as_mut().unwrap().write(&[0]);
                 
                 thread::sleep(WAKE_DELAY);
-                let _ = self.swi_port.as_mut().unwrap().set_baud_rate(230_400);
+                let _ = self.swi_port.as_mut().unwrap().set_baud_rate(SWI_DEFAULT_BAUDRATE);
                 let _ = self.swi_port.as_mut().unwrap().clear(ClearBuffer::All);
                 Ok(()) 
             },
@@ -90,11 +95,11 @@ impl EccTransport
             } 
             TransportProtocol::Swi => {
                 let mut sleep_msg = BytesMut::new();
-                sleep_msg.put_u8(0xCC);
+                sleep_msg.put_u8(ATCA_SWI_SLEEP_FLAG);
                 let sleep_encoded = self.encode_uart_to_swi(&sleep_msg);
         
                 let _ = self.swi_port.as_mut().unwrap().write(&sleep_encoded);
-                thread::sleep( Duration::from_micros(300));
+                thread::sleep( SWI_BIT_SEND_DELAY * 8);
             },
         }
     }
@@ -161,7 +166,7 @@ impl EccTransport
         let send_size = self.swi_port.as_mut().unwrap().write(buf)?;
 
         //Each byte takes ~45us to transmit, so we must wait for the transmission to finish before proceeding
-        let uart_tx_time = Duration::from_micros( (buf.len() * 45) as u64); 
+        let uart_tx_time = buf.len() as u32 * SWI_BIT_SEND_DELAY; 
         thread::sleep(uart_tx_time);
         //Because Tx line is linked with Rx line, all sent msgs are returned on the Rx line and must be cleared from the buffer
         let mut clear_rx_line = BytesMut::new();
@@ -176,7 +181,7 @@ impl EccTransport
         buf[1] = 0xFF;
 
         let mut transmit_flag = BytesMut::new();
-        transmit_flag.put_u8(0x88);
+        transmit_flag.put_u8(ATCA_SWI_TRANSMIT_FLAG);
         let encoded_transmit_flag = self.encode_uart_to_swi(&transmit_flag );
 
         let _ = self.swi_port.as_mut().unwrap().clear(ClearBuffer::All);
