@@ -30,7 +30,7 @@ pub(crate) struct EccTransport {
 impl EccTransport {
     pub fn from_path(path: &str, address: u16) -> Result<Self> {
         
-        if path.contains("/dev/tty"){
+        if path.starts_with("/dev/tty"){
             let swi_port = serialport::new(path, SWI_DEFAULT_BAUDRATE)
             .data_bits(serialport::DataBits::Seven)
             .parity(serialport::Parity::None)
@@ -48,7 +48,7 @@ impl EccTransport {
                 protocol: TransportProtocol::Swi
             })    
         }
-        else if path.contains("/dev/i2c") {
+        else if path.starts_with("/dev/i2c") {
             let mut i2c = I2c::from_path(path)?;
             i2c.smbus_set_slave_address(address, false)?;
             
